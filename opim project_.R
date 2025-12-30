@@ -1,14 +1,19 @@
 ##################
 #Exploratory Data Analysis (EDA)
 
-setwd("C:/Users/iremo/Desktop/OPIM PROJECT")
+# Working directory'yi script'in bulunduğu klasöre ayarla
+setwd("/Users/almiraaygun/Downloads/pumpitup-opim390/opim-390-final-project-r")
 getwd()
 list.files()
 
-#loading the necessary libraries
+# loading the necessary libraries
 library(readr)
 library(dplyr)
 library(ggplot2)
+library(tidyr)
+
+# optional: run the heavier global association tests (ANOVA + chi-square for all features)
+RUN_FULL_ASSOCIATION <- TRUE
 
 train_values <- read_csv("train_values.csv", show_col_types = FALSE)
 train_labels <- read_csv("train_labels.csv", show_col_types = FALSE)
@@ -53,9 +58,6 @@ target_props  <- prop.table(target_counts)
 target_counts
 round(target_props, 4)
 
-# Bar plot
-library(ggplot2)
-
 ggplot(train, aes(x = status_group)) +
   geom_bar() +
   labs(
@@ -92,9 +94,6 @@ na_summary <- data.frame(
 
 # Show top 10 columns with most missing values
 head(na_summary, 10)
-
-# Optional: bar plot for top 10 missing columns
-library(ggplot2)
 
 top10_na <- na_summary %>% slice(1:10)
 
@@ -143,8 +142,6 @@ head(zero_rate_tbl, 10)
 #   - Inspect the distribution of key numeric features
 #   - Check skewness, outliers, and the impact of many zeros
 #   - Compare raw scale vs log-transformed scale (log1p)
-
-library(ggplot2)
 
 # amount_tsh
 ggplot(train, aes(x = amount_tsh)) +
@@ -206,6 +203,7 @@ cat_vars <- c(
   "payment_type",
   "waterpoint_type_group"
 )
+cat_vars <- cat_vars[cat_vars %in% names(train)]
 
 for (v in cat_vars) {
   p <- ggplot(train, aes(x = .data[[v]], fill = status_group)) +
@@ -224,16 +222,6 @@ for (v in cat_vars) {
 # Step 7b: Rank categorical variables by association with target (chi-square)
 
 
-cat_vars <- c(
-  "quantity_group",
-  "water_quality",
-  "source_class",
-  "extraction_type_class",
-  "management_group",
-  "payment_type",
-  "waterpoint_type_group"
-)
-
 chi_tbl <- lapply(cat_vars, function(v) {
   tab <- table(train[[v]], train$status_group)
   test <- suppressWarnings(chisq.test(tab))
@@ -248,21 +236,10 @@ chi_tbl <- lapply(cat_vars, function(v) {
 chi_tbl
 
 
-
-
-
-
-
-
-
-
-
-
 ###############################
 # FULL FEATURE ASSOCIATION CHECK
 ###############################
-
-library(dplyr)
+if (RUN_FULL_ASSOCIATION) {
 
 # 1️⃣ Prepare data
 train_full <- train %>%
@@ -313,4 +290,124 @@ cat_results <- lapply(cat_cols, function(v) {
 
 print(num_results)
 print(cat_results)
+}
+
+
+###############################################################
+# FEATURE SELECTION ANALYSIS (clean, no re-loading)
+###############################################################
+
+# Prepare for selection analysis
+train_full <- train %>%
+  mutate(across(where(is.logical), ~ factor(ifelse(is.na(.x), "Unknown",
+                                                  ifelse(.x, "TRUE", "FALSE")))))
+
+num_cols_fs <- names(train_full)[sapply(train_full, is.numeric)]
+num_cols_fs <- setdiff(num_cols_fs, c("id"))
+
+cat_cols_fs <- names(train_full)[sapply(train_full, function(x) is.character(x) || is.factor(x))]
+cat_cols_fs <- setdiff(cat_cols_fs, "status_group")
+
+# 1) High cardinality analysis
+cardinality_analysis <- data.frame(
+  variable = cat_cols_fs,
+  unique_count = sapply(cat_cols_fs, function(v) length(unique(train_full[[v]])))
+) %>%
+  arrange(desc(unique_count)) %>%
+  mutate(category = case_when(
+    unique_count > 1000 ~ "Very High (>1000)",
+    unique_count > 100 ~ "High (100-1000)",
+    unique_count > 20 ~ "Medium (20-100)",
+    TRUE ~ "Low (<20)"
+  ))
+
+head(cardinality_analysis, 30)
+
+high_card_vars <- cardinality_analysis %>%
+  filter(unique_count > 100) %>%
+  pull(variable)
+
+# 2) Redundant numeric features (high correlation pairs)
+numeric_for_corr <- train_full %>% select(all_of(num_cols_fs))
+cor_matrix <- cor(numeric_for_corr, use = "complete.obs")
+
+high_corr_pairs <- data.frame(var1 = character(), var2 = character(), correlation = numeric())
+for (i in 1:(nrow(cor_matrix) - 1)) {
+  for (j in (i + 1):ncol(cor_matrix)) {
+    cor_val <- cor_matrix[i, j]
+    if (!is.na(cor_val) && abs(cor_val) > 0.8) {
+      high_corr_pairs <- rbind(
+        high_corr_pairs,
+        data.frame(
+          var1 = rownames(cor_matrix)[i],
+          var2 = colnames(cor_matrix)[j],
+          correlation = round(cor_val, 4)
+        )
+      )
+    }
+  }
+}
+
+high_corr_pairs %>% arrange(desc(abs(correlation)))
+
+# 3) Grouped / redundant categorical variables (report only)
+grouped_vars <- list(
+  extraction = c("extraction_type", "extraction_type_group", "extraction_type_class"),
+  management = c("management", "management_group"),
+  payment = c("payment", "payment_type"),
+  quality = c("water_quality", "quality_group"),
+  quantity = c("quantity", "quantity_group"),
+  source = c("source", "source_type", "source_class"),
+  waterpoint = c("waterpoint_type", "waterpoint_type_group")
+)
+
+for (group_name in names(grouped_vars)) {
+  existing_vars <- grouped_vars[[group_name]][grouped_vars[[group_name]] %in% names(train_full)]
+  if (length(existing_vars) > 1) {
+    cat("\n", group_name, "group:\n")
+    print(existing_vars)
+  }
+}
+
+# 4) Low variance numeric
+low_variance_vars <- numeric_for_corr %>%
+  summarise(across(everything(), ~ var(.x, na.rm = TRUE))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "variance") %>%
+  filter(variance < 0.01 | is.na(variance)) %>%
+  arrange(variance)
+
+low_variance_vars
+
+# 5) Final removal list (analysis-based)
+features_to_remove <- list(
+  id = c("id"),
+  high_cardinality = high_card_vars,
+  low_variance = low_variance_vars$variable,
+  redundant_groups = c(
+    "extraction_type_group", "management_group", "quality_group",
+    "quantity_group", "source_type", "waterpoint_type_group"
+  ),
+  redundant_payment = c("payment"),
+  near_constant = c("recorded_by")
+)
+
+all_features_to_remove <- unique(unlist(features_to_remove))
+all_features_to_remove <- all_features_to_remove[all_features_to_remove %in% names(train_full)]
+
+cat("\nFEATURES TO REMOVE:\n")
+print(all_features_to_remove)
+
+recommended_features <- setdiff(names(train_full), c(all_features_to_remove, "id", "status_group"))
+cat("\nRECOMMENDED FEATURES COUNT:", length(recommended_features), "\n")
+
+###############################################################
+# FEATURE ENGINEERING RECOMMENDATIONS (Text Only)
+###############################################################
+cat("\nSuggested engineered features (not implemented):\n")
+cat(" - pump_age = current_year - construction_year\n")
+cat(" - years_since_recorded from date_recorded\n")
+cat(" - gps_quality flag (gps_height==0 or longitude==0)\n")
+cat(" - log1p(population), log1p(amount_tsh)\n")
+cat(" - missing indicators (has_funder, has_installer, etc.)\n")
+
 
