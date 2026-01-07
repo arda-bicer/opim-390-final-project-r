@@ -1,316 +1,416 @@
-##################
-#Exploratory Data Analysis (EDA)
+# ============================================================
+# PUMP IT UP: MODEL BUILDING & ASSESSMENT
+# Person 3: Model Builder
+# ============================================================
 
-setwd("C:/Users/iremo/Desktop/OPIM PROJECT")
-getwd()
-list.files()
+# uncomment next lines if packages not installed yet
+# install.packages("caret")
+# install.packages("randomForest")
+# install.packages("xgboost")
+# install.packages("rpart")
+# install.packages("rpart.plot")
+# install.packages("dplyr")
+# install.packages("ggplot2")
+# install.packages("readr")
 
-#loading the necessary libraries
-library(readr)
+# load necessary libraries
+library(caret)
+library(randomForest)
+library(xgboost)
+library(rpart)
+library(rpart.plot)
 library(dplyr)
 library(ggplot2)
+library(readr)
 
-train_values <- read_csv("train_values.csv", show_col_types = FALSE)
-train_labels <- read_csv("train_labels.csv", show_col_types = FALSE)
-test_values  <- read_csv("test_values.csv",  show_col_types = FALSE)
-sub_format   <- read_csv("submission_format.csv", show_col_types = FALSE)
+# ---------------------------
+# 1) Load Data
+# ---------------------------
 
-dim(train_values); dim(train_labels); dim(test_values); dim(sub_format)
+# read in files
+train_values = read_csv("train_values.csv", show_col_types = FALSE)
+train_labels = read_csv("train_labels.csv", show_col_types = FALSE)
+test_values  = read_csv("test_values.csv", show_col_types = FALSE)
 
-#merging the two data sets: train values and train labels
-train <- train_values %>%
+# merge training data with labels
+df = train_values %>%
   left_join(train_labels, by = "id")
 
-#check of merged data
-nrow(train)                      # must be the same as train_values
-sum(is.na(train$status_group))   # must be 0
+dim(df)
+str(df)
 
-table(train$status_group)
-prop.table(table(train$status_group))
+# target variable distribution
+table(df$status_group)
+prop.table(table(df$status_group))
 
-#name of the merged data is train. 
+# ---------------------------
+# 2) Data Preprocessing (from Person 2)
+# ---------------------------
 
+# NOTE: This section should come from Person 2's preprocessing script
+# For now, implementing basic preprocessing so models can run
 
-##################
-# Step 1: Dataset overview
+# drop high cardinality columns
+cols_to_drop = c("id", "recorded_by", "wpt_name", "subvillage", 
+                 "ward", "scheme_name", "installer", "funder",
+                 "quantity_group", "source_type", "source_class",
+                 "waterpoint_type_group", "payment", "extraction_type_group",
+                 "extraction_type_class", "management_group", "region_code",
+                 "lga", "scheme_management", "extraction_type")
 
-# Basic dimensions
-dim(train)
+df = df %>% select(-any_of(cols_to_drop))
 
-# Column names
-names(train)
+# handle zeros (missing values)
+df$longitude[df$longitude == 0] = median(df$longitude[df$longitude != 0], na.rm = TRUE)
+df$gps_height[df$gps_height == 0] = median(df$gps_height[df$gps_height != 0], na.rm = TRUE)
+df$construction_year[df$construction_year == 0] = median(df$construction_year[df$construction_year != 0], na.rm = TRUE)
+df$population[df$population == 0] = median(df$population[df$population != 0], na.rm = TRUE)
 
-# Quick structure check
-glimpse(train)
+# create pump age feature
+df$pump_age = 2024 - df$construction_year
 
-##################
-# Step 2: Target distribution
+# log transform skewed features
+df$log_amount_tsh = log1p(df$amount_tsh)
+df$log_population = log1p(df$population)
 
-# Count and proportion tables
-target_counts <- table(train$status_group)
-target_props  <- prop.table(target_counts)
-
-target_counts
-round(target_props, 4)
-
-# Bar plot
-library(ggplot2)
-
-ggplot(train, aes(x = status_group)) +
-  geom_bar() +
-  labs(
-    title = "Distribution of Target Variable (status_group)",
-    x = "Status Group",
-    y = "Count"
-  ) +
-  theme(axis.text.x = element_text(angle = 15, hjust = 1))
-
-# Insight:
-# The target variable is imbalanced. The "functional needs repair" class is much smaller
-# than the other two classes, which may affect model performance and should be considered
-# during validation.
-
-
-
-##################
-# Step 3: Missing values (NA)
-
-
-# NA count per column
-na_count <- colSums(is.na(train))
-
-# NA percentage per column
-na_pct <- round(na_count / nrow(train) * 100, 2)
-
-# Combine into a table
-na_summary <- data.frame(
-  column = names(na_count),
-  na_count = as.integer(na_count),
-  na_pct = as.numeric(na_pct)
-) %>%
-  arrange(desc(na_count))
-
-# Show top 10 columns with most missing values
-head(na_summary, 10)
-
-# Optional: bar plot for top 10 missing columns
-library(ggplot2)
-
-top10_na <- na_summary %>% slice(1:10)
-
-ggplot(top10_na, aes(x = reorder(column, na_count), y = na_count)) +
-  geom_col() +
-  coord_flip() +
-  labs(
-    title = "Top 10 Columns with Missing Values",
-    x = "Column",
-    y = "Number of Missing Values"
-  )
-
-# Insight:
-# Missing values are not evenly distributed across features.
-# Columns with high missingness may require special imputation strategies
-# or could be excluded depending on their usefulness.
-
-###################
-# Step 4: Obvious anomalies / suspicious zeros
-
-# We check the share of zero values across numeric columns.
-# In this dataset, zeros can sometimes indicate missing/unknown values (e.g., construction_year = 0).
-
-
-num_cols <- names(train)[sapply(train, is.numeric)]
-
-zero_rate_tbl <- data.frame(
-  column = num_cols,
-  zero_count = sapply(train[num_cols], function(x) sum(x == 0, na.rm = TRUE)),
-  zero_pct = round(sapply(train[num_cols], function(x) mean(x == 0, na.rm = TRUE)) * 100, 2)
-) %>%
-  arrange(desc(zero_pct))
-
-# Show top 10 numeric columns with the highest zero share
-head(zero_rate_tbl, 10)
-
-# Insight (Step 4):
-# Several numeric features have many zeros (amount_tsh ~70%; population/construction_year/gps_height ~35%).
-# These zeros may represent unknown/missing values rather than true zeros, so they may need special handling
-# during preprocessing. Longitude has ~3% zeros (likely missing/invalid GPS), while num_private is ~99% zeros
-# and is probably a genuine distribution.
-
-#####################
-# Step 5: Numeric distributions
-# Goal:
-#   - Inspect the distribution of key numeric features
-#   - Check skewness, outliers, and the impact of many zeros
-#   - Compare raw scale vs log-transformed scale (log1p)
-
-library(ggplot2)
-
-# amount_tsh
-ggplot(train, aes(x = amount_tsh)) +
-  geom_histogram() +
-  labs(title = "Histogram: amount_tsh", x = "amount_tsh", y = "Count")
-
-ggplot(train, aes(x = log1p(amount_tsh))) +
-  geom_histogram() +
-  labs(title = "Histogram: log1p(amount_tsh)", x = "log1p(amount_tsh)", y = "Count")
-
-# population
-ggplot(train, aes(x = population)) +
-  geom_histogram() +
-  labs(title = "Histogram: population", x = "population", y = "Count")
-
-ggplot(train, aes(x = log1p(population))) +
-  geom_histogram() +
-  labs(title = "Histogram: log1p(population)", x = "log1p(population)", y = "Count")
-
-# gps_height
-ggplot(train, aes(x = gps_height)) +
-  geom_histogram() +
-  labs(title = "Histogram: gps_height", x = "gps_height", y = "Count")
-
-#####################
-# Step 6: Numeric features vs target (status_group)
-
-ggplot(train, aes(x = status_group, y = log1p(amount_tsh), fill = status_group)) +
-  geom_boxplot(outlier.alpha = 0.2) +
-  labs(title = "log1p(amount_tsh) by status_group") +
-  theme(axis.text.x = element_text(angle = 15, hjust = 1))
-
-ggplot(train, aes(x = status_group, y = log1p(population), fill = status_group)) +
-  geom_boxplot(outlier.alpha = 0.2) +
-  labs(title = "log1p(population) by status_group") +
-  theme(axis.text.x = element_text(angle = 15, hjust = 1))
-
-ggplot(train, aes(x = status_group, y = gps_height, fill = status_group)) +
-  geom_boxplot(outlier.alpha = 0.2) +
-  labs(title = "gps_height by status_group") +
-  theme(axis.text.x = element_text(angle = 15, hjust = 1))
-
-##########################
-# Step 7: Categorical features vs target (status_group)
-
-# Goal:
-#   - Compare category distributions across status_group
-#   - Identify categorical variables that strongly separate classes
-# Note:
-#   - We plot proportions (position = "fill") to compare class composition within each category.
-
-
-cat_vars <- c(
-  "quantity_group",
-  "water_quality",
-  "source_class",
-  "extraction_type_class",
-  "management_group",
-  "payment_type",
-  "waterpoint_type_group"
-)
-
-for (v in cat_vars) {
-  p <- ggplot(train, aes(x = .data[[v]], fill = status_group)) +
-    geom_bar(position = "fill") +
-    labs(
-      title = paste("status_group proportion by", v),
-      x = v,
-      y = "Proportion"
-    ) +
-    theme(axis.text.x = element_text(angle = 30, hjust = 1))
-  
-  print(p)
+# convert character columns to factors (limit levels)
+char_cols = names(df)[sapply(df, is.character)]
+for (col in char_cols) {
+  if (col != "status_group") {
+    top_levels = names(sort(table(df[[col]]), decreasing = TRUE))[1:15]
+    df[[col]] = ifelse(df[[col]] %in% top_levels, df[[col]], "Other")
+    df[[col]] = as.factor(df[[col]])
+  }
 }
 
-###################
-# Step 7b: Rank categorical variables by association with target (chi-square)
+# drop original columns
+df = df %>% select(-amount_tsh, -construction_year, -population)
 
+# encode target as factor
+df$status_group = factor(df$status_group,
+                         levels = c("functional", "functional needs repair", "non functional"))
 
-cat_vars <- c(
-  "quantity_group",
-  "water_quality",
-  "source_class",
-  "extraction_type_class",
-  "management_group",
-  "payment_type",
-  "waterpoint_type_group"
+str(df)
+dim(df)
+
+# ---------------------------
+# 3) Train-Validation Split
+# ---------------------------
+
+set.seed(1975)
+
+# stratified sampling
+indxTrain = createDataPartition(y = df$status_group, p = 0.8, list = FALSE)
+
+training = df[indxTrain, ]
+testing = df[-indxTrain, ]
+
+# verify proportions
+prop.table(table(training$status_group))
+prop.table(table(testing$status_group))
+
+dim(training)
+dim(testing)
+
+# ---------------------------
+# 4) Cross-Validation Setup
+# ---------------------------
+
+# 5-fold CV for faster training
+ctrl = trainControl(
+  method = "cv",
+  number = 5,
+  classProbs = TRUE,
+  summaryFunction = multiClassSummary,
+  verboseIter = TRUE
 )
 
-chi_tbl <- lapply(cat_vars, function(v) {
-  tab <- table(train[[v]], train$status_group)
-  test <- suppressWarnings(chisq.test(tab))
-  data.frame(
-    variable = v,
-    p_value = test$p.value,
-    chi_square = unname(test$statistic)
+# ============================================================
+# MODEL 1: DECISION TREE (Baseline)
+# ============================================================
+
+cp_grid = expand.grid(cp = seq(0.001, 0.02, length.out = 10))
+
+set.seed(1975)
+treeFit = train(
+  status_group ~ .,
+  data = training,
+  method = "rpart",
+  trControl = ctrl,
+  tuneGrid = cp_grid,
+  metric = "Accuracy"
+)
+
+treeFit$bestTune
+treeFit
+
+# visualize tree
+rpart.plot(treeFit$finalModel)
+rpart.rules(treeFit$finalModel)
+
+# evaluate on test set
+treePred = predict(treeFit, newdata = testing)
+tree_cm = confusionMatrix(treePred, testing$status_group)
+tree_cm
+
+# ============================================================
+# MODEL 2: RANDOM FOREST
+# ============================================================
+
+mtry_grid = expand.grid(mtry = c(3, 5, 7, 10))
+
+set.seed(1975)
+rfFit = train(
+  status_group ~ .,
+  data = training,
+  method = "rf",
+  trControl = ctrl,
+  tuneGrid = mtry_grid,
+  ntree = 200,
+  importance = TRUE,
+  metric = "Accuracy"
+)
+
+rfFit$bestTune
+rfFit
+
+# plot accuracy vs mtry
+plot(rfFit)
+
+# variable importance
+varImp(rfFit, scale = FALSE)
+
+# evaluate on test set
+rfPred = predict(rfFit, newdata = testing)
+rf_cm = confusionMatrix(rfPred, testing$status_group)
+rf_cm
+
+# ============================================================
+# MODEL 3: XGBOOST
+# ============================================================
+
+xgb_grid = expand.grid(
+  nrounds = c(100, 150),
+  max_depth = c(4, 6, 8),
+  eta = c(0.1, 0.3),
+  gamma = 0,
+  colsample_bytree = 0.8,
+  min_child_weight = c(1, 3),
+  subsample = 0.8
+)
+
+set.seed(1975)
+xgbFit = train(
+  status_group ~ .,
+  data = training,
+  method = "xgbTree",
+  trControl = ctrl,
+  tuneGrid = xgb_grid,
+  metric = "Accuracy",
+  verbose = FALSE
+)
+
+xgbFit$bestTune
+xgbFit
+
+# evaluate on test set
+xgbPred = predict(xgbFit, newdata = testing)
+xgb_cm = confusionMatrix(xgbPred, testing$status_group)
+xgb_cm
+
+# ============================================================
+# MODEL 4: KNN
+# ============================================================
+
+knn_grid = expand.grid(k = seq(3, 25, by = 2))
+
+set.seed(1975)
+knnFit = train(
+  status_group ~ .,
+  data = training,
+  method = "knn",
+  trControl = ctrl,
+  tuneGrid = knn_grid,
+  preProcess = c("center", "scale"),
+  metric = "Accuracy"
+)
+
+knnFit$bestTune
+knnFit
+
+plot(knnFit)
+
+# evaluate on test set
+knnPred = predict(knnFit, newdata = testing)
+knn_cm = confusionMatrix(knnPred, testing$status_group)
+knn_cm
+
+# ============================================================
+# MODEL COMPARISON
+# ============================================================
+
+# compare cross-validation results
+resamps = resamples(list(
+  DecisionTree = treeFit,
+  RandomForest = rfFit,
+  XGBoost = xgbFit,
+  KNN = knnFit
+))
+
+summary(resamps, metric = "Accuracy")
+
+# boxplot comparison
+bwplot(resamps, metric = "Accuracy")
+
+# dotplot comparison
+dotplot(resamps, metric = "Accuracy")
+
+# collect test set results
+results = data.frame(
+  Model = c("Decision Tree", "Random Forest", "XGBoost", "KNN"),
+  Accuracy = c(
+    tree_cm$overall["Accuracy"],
+    rf_cm$overall["Accuracy"],
+    xgb_cm$overall["Accuracy"],
+    knn_cm$overall["Accuracy"]
+  ),
+  Kappa = c(
+    tree_cm$overall["Kappa"],
+    rf_cm$overall["Kappa"],
+    xgb_cm$overall["Kappa"],
+    knn_cm$overall["Kappa"]
   )
-}) %>% bind_rows() %>%
-  arrange(p_value)
+)
 
-chi_tbl
+results = results %>% arrange(desc(Accuracy))
+results
 
+# best model
+best_model = results$Model[1]
+best_acc = results$Accuracy[1]
 
+cat("\n========================================\n")
+cat("BEST MODEL:", best_model, "\n")
+cat("TEST ACCURACY:", round(best_acc, 4), "\n")
+cat("========================================\n")
 
+# ---------------------------
+# Class-wise Performance Analysis
+# ---------------------------
 
+# show confusion matrix of best model
+if (best_model == "XGBoost") {
+  best_cm = xgb_cm
+} else if (best_model == "Random Forest") {
+  best_cm = rf_cm
+} else if (best_model == "KNN") {
+  best_cm = knn_cm
+} else {
+  best_cm = tree_cm
+}
 
+best_cm$table
 
+# class-wise metrics
+class_metrics = data.frame(
+  Class = rownames(best_cm$byClass),
+  Sensitivity = round(best_cm$byClass[, "Sensitivity"], 4),
+  Specificity = round(best_cm$byClass[, "Specificity"], 4),
+  Precision = round(best_cm$byClass[, "Precision"], 4),
+  F1 = round(best_cm$byClass[, "F1"], 4)
+)
+class_metrics
 
+# NOTE: "functional needs repair" class typically has lower performance
+# due to class imbalance (only ~7% of data)
 
+# ---------------------------
+# Generate Test Predictions for Person 4
+# ---------------------------
 
+# store training medians for imputation
+train_median_lon = median(train_values$longitude[train_values$longitude != 0], na.rm = TRUE)
+train_median_height = median(train_values$gps_height[train_values$gps_height != 0], na.rm = TRUE)
+train_median_year = median(train_values$construction_year[train_values$construction_year != 0], na.rm = TRUE)
+train_median_pop = median(train_values$population[train_values$population != 0], na.rm = TRUE)
 
+# apply same preprocessing to test data
+test_processed = test_values %>% select(-any_of(cols_to_drop))
 
+# impute zeros with training medians
+test_processed$longitude[test_processed$longitude == 0] = train_median_lon
+test_processed$gps_height[test_processed$gps_height == 0] = train_median_height
+test_processed$construction_year[test_processed$construction_year == 0] = train_median_year
+test_processed$population[test_processed$population == 0] = train_median_pop
 
-###############################
-# FULL FEATURE ASSOCIATION CHECK
-###############################
+# create features
+test_processed$pump_age = 2024 - test_processed$construction_year
+test_processed$log_amount_tsh = log1p(test_processed$amount_tsh)
+test_processed$log_population = log1p(test_processed$population)
 
-library(dplyr)
+# convert character to factors with same levels as training
+test_char_cols = names(test_processed)[sapply(test_processed, is.character)]
+for (col in test_char_cols) {
+  if (col %in% names(training)) {
+    # map unseen levels to "Other"
+    test_processed[[col]] = ifelse(test_processed[[col]] %in% levels(training[[col]]), 
+                                    test_processed[[col]], "Other")
+    test_processed[[col]] = factor(test_processed[[col]], levels = levels(training[[col]]))
+  }
+}
 
-# 1️⃣ Prepare data
-train_full <- train %>%
-  mutate(across(where(is.logical), ~ ifelse(is.na(.x), "Unknown",
-                                            ifelse(.x, "TRUE", "FALSE"))))
+# drop original columns
+test_processed = test_processed %>% select(-amount_tsh, -construction_year, -population)
 
-# 2️⃣ Separate feature types
-num_cols <- names(train_full)[sapply(train_full, is.numeric)]
-cat_cols <- names(train_full)[sapply(train_full, function(x) is.character(x) || is.factor(x))]
-cat_cols <- setdiff(cat_cols, "status_group")  # remove target
+# verify test data has same columns as training (except target)
+train_cols = setdiff(names(training), "status_group")
+test_cols = names(test_processed)
+cat("Training features:", length(train_cols), "\n")
+cat("Test features:", length(test_cols), "\n")
 
-#######################
-# 3️⃣ Numeric Variables - ANOVA
-#######################
-num_results <- lapply(num_cols, function(v) {
-  f <- as.formula(paste(v, "~ status_group"))
-  p_value <- suppressWarnings(summary(aov(f, data = train_full))[[1]][["Pr(>F)"]][1])
-  data.frame(variable = v, p_value = p_value)
-}) %>% bind_rows() %>%
-  arrange(p_value) %>%
-  mutate(strength = case_when(
-    p_value < 0.001 ~ "very strong",
-    p_value < 0.01 ~ "strong",
-    p_value < 0.05 ~ "moderate",
-    TRUE ~ "weak"
-  ))
+# check for any NA values
+na_count = sum(is.na(test_processed))
+cat("NA values in test set:", na_count, "\n")
 
-#######################
-# 4️⃣ Categorical Variables - Chi-Square
-#######################
-cat_results <- lapply(cat_cols, function(v) {
-  tab <- table(train_full[[v]], train_full$status_group)
-  test <- suppressWarnings(chisq.test(tab))
-  data.frame(variable = v, chi_square = unname(test$statistic), p_value = test$p.value)
-}) %>%
-  bind_rows() %>%
-  arrange(desc(chi_square)) %>%
-  mutate(strength = case_when(
-    p_value < 0.001 ~ "very strong",
-    p_value < 0.01 ~ "strong",
-    p_value < 0.05 ~ "moderate",
-    TRUE ~ "weak"
-  ))
+# generate predictions with best model
+if (best_model == "XGBoost") {
+  final_pred = predict(xgbFit, newdata = test_processed)
+} else if (best_model == "Random Forest") {
+  final_pred = predict(rfFit, newdata = test_processed)
+} else if (best_model == "KNN") {
+  final_pred = predict(knnFit, newdata = test_processed)
+} else {
+  final_pred = predict(treeFit, newdata = test_processed)
+}
 
-#######################
-# 5️⃣ Output Summary
-#######################
+# prediction distribution
+table(final_pred)
+prop.table(table(final_pred))
 
-print(num_results)
-print(cat_results)
+# create submission file for Person 4
+submission = data.frame(
+  id = test_values$id,
+  status_group = as.character(final_pred)
+)
 
+head(submission, 10)
+write.csv(submission, "submission.csv", row.names = FALSE)
+
+# save best model for Person 4
+if (best_model == "XGBoost") {
+  saveRDS(xgbFit, "best_model.rds")
+} else if (best_model == "Random Forest") {
+  saveRDS(rfFit, "best_model.rds")
+} else if (best_model == "KNN") {
+  saveRDS(knnFit, "best_model.rds")
+} else {
+  saveRDS(treeFit, "best_model.rds")
+}
+
+# save results summary
+saveRDS(results, "model_comparison_results.rds")
+
+cat("\nFiles saved for Person 4:\n")
+cat("  - submission.csv\n")
+cat("  - best_model.rds\n")
+cat("  - model_comparison_results.rds\n")
