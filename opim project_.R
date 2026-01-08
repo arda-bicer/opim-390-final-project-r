@@ -464,24 +464,40 @@ if (sum(is.na(combined$date_recorded)) > 0) {
       "missing dates with median:", as.character(median_date), "\n")
 }
 
-# Mevcut yıl (2013 olarak varsayıyoruz, veri setindeki en son yıl)
-current_year <- 2013
-
-# Pump yaşı
-combined$pump_age <- current_year - combined$construction_year
-combined$pump_age[combined$pump_age < 0 | is.na(combined$pump_age)] <- 0
-
 # Kayıt tarihinden özellikler
 combined$year_recorded <- year(combined$date_recorded)
 combined$month_recorded <- month(combined$date_recorded)
 combined$quarter_recorded <- quarter(combined$date_recorded)
 combined$day_of_year <- yday(combined$date_recorded)
 
+# Mevcut yıl (2013 olarak varsayıyoruz, veri setindeki en son yıl)
+current_year <- 2013
+
+# Pump yaşı (inspected year - construction year)
+combined$pump_age <- combined$year_recorded - combined$construction_year
+combined$pump_age[combined$pump_age < 0 | is.na(combined$pump_age)] <- 0
+# If construction_year is 0, pump_age is huge. Fix:
+combined$pump_age[combined$construction_year == 0] <- 0
+
+# Seasonality (Tanzania seasons)
+# Long rains: March-May (3,4,5)
+# Short rains: Oct-Dec (10,11,12)
+# Dry: Jan, Feb, June, July, Aug, Sep
+combined$season <- "dry"
+combined$season[combined$month_recorded %in% c(3, 4, 5)] <- "long_rain"
+combined$season[combined$month_recorded %in% c(10, 11, 12)] <- "short_rain"
+combined$season <- as.factor(combined$season)
+
+# Construction Decade
+combined$construction_decade <- floor(combined$construction_year / 10) * 10
+combined$construction_decade[combined$construction_year == 0] <- 0
+combined$construction_decade <- as.factor(combined$construction_decade)
+
 # Kayıt üzerinden geçen yıl
 combined$years_since_recorded <- current_year - combined$year_recorded
 combined$years_since_recorded[is.na(combined$years_since_recorded)] <- 0
 
-cat(" ✓ Temporal features created\n")
+cat(" ✓ Temporal features created (including season & decade)\n")
 
 # 1b. Geographic Features
 cat("Creating geographic features...\n")
@@ -496,7 +512,20 @@ combined$distance_to_equator <- abs(combined$latitude)
 # Bölge-İlçe kombinasyonu
 combined$region_district <- paste(combined$region, combined$district_code, sep = "_")
 
-cat(" ✓ Geographic features created\n")
+# Spatial Clustering (K-means on Lat/Lon)
+# Treat (0,0) as missing for clustering calculation, but assign them a cluster later
+valid_geo <- which(combined$longitude != 0 & combined$latitude != 0)
+if(length(valid_geo) > 100) {
+  set.seed(42)
+  coords <- combined[valid_geo, c("longitude", "latitude")]
+  km_fit <- kmeans(scale(coords), centers = 12, nstart = 20)
+
+  combined$geo_cluster <- "cluster_unknown"
+  combined$geo_cluster[valid_geo] <- as.character(km_fit$cluster)
+  combined$geo_cluster <- as.factor(combined$geo_cluster)
+}
+
+cat(" ✓ Geographic features created (including clusters)\n")
 
 # 1c. Population and Usage Features
 cat("Creating population/usage features...\n")
@@ -510,6 +539,9 @@ combined$has_population <- ifelse(combined$population > 0, 1, 0)
 combined$has_amount_tsh <- ifelse(combined$amount_tsh > 0, 1, 0)
 combined$has_construction_year <- ifelse(combined$construction_year > 0, 1, 0)
 combined$has_gps_height <- ifelse(combined$gps_height > 0, 1, 0)
+
+# Amount per person
+combined$amount_per_person <- combined$amount_tsh / (combined$population + 1)
 
 cat(" ✓ Population/usage features created\n")
 
@@ -550,6 +582,19 @@ combined$has_public_meeting <- ifelse(is.na(combined$public_meeting), 0, 1)
 combined$has_permit <- ifelse(is.na(combined$permit), 0, 1)
 
 cat(" ✓ Missing value indicators created\n")
+
+# 1f. Frequency Encoding
+cat("Creating frequency encoded features...\n")
+freq_cols <- c("funder", "installer", "ward", "lga", "subvillage")
+for(col in freq_cols) {
+  if(col %in% names(combined)) {
+    tbl <- table(combined[[col]])
+    combined[[paste0(col, "_freq")]] <- as.numeric(tbl[combined[[col]]])
+    # Handle NAs (if any were not in table or original was NA)
+    combined[[paste0(col, "_freq")]][is.na(combined[[col]])] <- 0
+  }
+}
+cat(" ✓ Frequency encoded features created\n")
 
 cat("Feature engineering completed!\n\n")
 
